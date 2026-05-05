@@ -5,7 +5,9 @@ let
     runtimeInputs = with pkgs; [
       tpm2-tools openssl coreutils gnugrep gnused gawk util-linux xxd bash
     ];
-    text = builtins.readFile ../scripts/attest.sh;
+    text = ''
+      exec ${../scripts/attest.sh} "$@"
+    '';
   };
 in
 {
