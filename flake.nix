@@ -3,15 +3,14 @@
 
   inputs = {
     xnode-manager.url = "github:Openmesh-Network/xnode-manager";
-    # Follow openclaw's nixpkgs pin — known-working with xnode-manager's
-    # nixos-containers (dhcpcd starts, mDNS publishes). xnode-manager's own
-    # bleeding-edge unstable causes container-boot failures.
-    openclaw.url = "github:openclaw/nix-openclaw";
-    nixpkgs.follows = "openclaw/nixpkgs";
+    # Pinned to a stable nixpkgs commit known to boot cleanly inside
+    # xnode-manager's nixos-containers. Bleeding-edge nixpkgs causes
+    # dhcpcd / mDNS startup issues in the container.
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, xnode-manager, openclaw, flake-utils }:
+  outputs = { self, nixpkgs, xnode-manager, flake-utils }:
     let
       # Runtime closure — every binary attest.sh shells out to is pinned here.
       attestRuntime = pkgs: pkgs.symlinkJoin {
@@ -68,8 +67,9 @@
       # produces a systemd-nspawn container that runs attest.sh once at
       # startup and once an hour, with output captured by the journal.
       nixosConfigurations.container = nixpkgs.lib.nixosSystem {
-        system = "x86_64-linux";
         specialArgs = { inherit self; };
+        # nixpkgs.hostPlatform is set by xnode-manager's container module
+        # from xnode-config/host-platform — don't set it again here.
         modules = [
           xnode-manager.nixosModules.container
           {
