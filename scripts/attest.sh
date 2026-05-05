@@ -321,10 +321,6 @@ AK_NAME_HEX=$(od -An -tx1 < ak.name 2>/dev/null | tr -d ' \n')
 
 # activatecredential needs a policy session satisfying TPM_RH_ENDORSEMENT
 # AND the EK referenced via its persistent handle (see EK_HANDLE above).
-# Flush leftover transient handles from earlier steps before starting.
-"$TPM2_BIN" flushcontext --transient-object 2>/dev/null || true
-"$TPM2_BIN" flushcontext --loaded-session 2>/dev/null || true
-
 step6_ok="false"
 if [ -n "$AK_NAME_HEX" ] \
     && "$TPM2_BIN" makecredential -T none -e ek.pub -s cred.secret \
