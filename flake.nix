@@ -2,15 +2,16 @@
   description = "xnode-tpm-attest — TPM2 remote-attestation self-test for xnodes, Own1 nodes, and any Linux machine with a TPM";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    xnode-manager = {
-      url = "github:Openmesh-Network/xnode-manager";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
+    xnode-manager.url = "github:Openmesh-Network/xnode-manager";
+    # Follow openclaw's nixpkgs pin — known-working with xnode-manager's
+    # nixos-containers (dhcpcd starts, mDNS publishes). xnode-manager's own
+    # bleeding-edge unstable causes container-boot failures.
+    openclaw.url = "github:openclaw/nix-openclaw";
+    nixpkgs.follows = "openclaw/nixpkgs";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, xnode-manager, flake-utils }:
+  outputs = { self, nixpkgs, xnode-manager, openclaw, flake-utils }:
     let
       # Runtime closure — every binary attest.sh shells out to is pinned here.
       attestRuntime = pkgs: pkgs.symlinkJoin {
@@ -77,6 +78,13 @@
               state-version = ./xnode-config/state-version;
               hostname      = ./xnode-config/hostname;
             };
+            # PIPELINE-LESSONS #6: dhcpcd doesn't auto-start in xnode-manager
+            # containers; force it so the container registers its hostname
+            # with the host's dnsmasq.
+            networking.useDHCP = true;
+            networking.dhcpcd.enable = true;
+            systemd.services.dhcpcd.wantedBy = [ "multi-user.target" ];
+            systemd.services.dhcpcd.enable = true;
           }
           ./nix/module.nix
         ];
