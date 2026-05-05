@@ -313,8 +313,10 @@ fi
 # ─── STEP 6 — credential activation (AK ↔ EK) ───────────────────────────
 hdr "Step 6 — Credential activation (proves AK ↔ EK binding)"
 
-CRED_HEX=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
-printf '%s' "$CRED_HEX" | xxd -r -p > cred.secret 2>/dev/null
+# Generate 16 random bytes directly to file (no xxd dependency — xxd
+# isn't always on the runtime PATH).
+head -c 16 /dev/urandom > cred.secret
+CRED_HEX=$(od -An -tx1 < cred.secret | tr -d ' \n')
 AK_NAME_HEX=$(od -An -tx1 < ak.name 2>/dev/null | tr -d ' \n')
 
 # activatecredential needs a policy session satisfying TPM_RH_ENDORSEMENT
