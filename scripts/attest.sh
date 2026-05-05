@@ -18,7 +18,12 @@ EVENTLOG="${EVENTLOG:-/sys/kernel/security/tpm0/binary_bios_measurements}"
 EFIVARS_DIR="${EFIVARS_DIR:-/sys/firmware/efi/efivars}"
 CA_DIR="${CA_DIR:-$(cd "$(dirname "$0")/../ca-bundle" 2>/dev/null && pwd || echo "")}"
 WORK_DIR=$(mktemp -d -t xnode-tpm-attest.XXXXXX)
-trap 'rm -rf "$WORK_DIR"' EXIT
+cleanup() {
+  rm -rf "$WORK_DIR"
+  # Evict the persistent EK we created (best-effort; ignore if not loaded)
+  "$TPM2_BIN" evictcontrol -C o -c "${EK_HANDLE:-0x81010009}" 2>/dev/null || true
+}
+trap cleanup EXIT
 
 export TPM2TOOLS_TCTI="${TPM2TOOLS_TCTI:-device:/dev/tpmrm0}"
 
@@ -120,8 +125,18 @@ hdr "Step 1 — Generate AK and quote PCRs"
 NONCE=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
 echo "  nonce: $NONCE"
 
-if "$TPM2_BIN" createek -c ek.handle -G rsa -u ek.pub 2>step1.err \
-    && "$TPM2_BIN" createak -C ek.handle -c ak.ctx -G rsa -g sha256 -s rsassa \
+# Use a persistent handle for the EK rather than a context file. The
+# context-file form has key attributes that make activatecredential return
+# TPM_RC_AUTH_UNAVAILABLE (0x12F) on Intel PTT and others — the canonical
+# tpm2-tools attestation test uses a persistent handle for this reason.
+# See test/integration/tests/attestation.sh in tpm2-software/tpm2-tools.
+EK_HANDLE="${EK_HANDLE:-0x81010009}"
+
+# Clean up any stale EK at this handle from a previous run (best-effort)
+"$TPM2_BIN" evictcontrol -C o -c "$EK_HANDLE" 2>/dev/null || true
+
+if "$TPM2_BIN" createek -c "$EK_HANDLE" -G rsa -u ek.pub 2>step1.err \
+    && "$TPM2_BIN" createak -C "$EK_HANDLE" -c ak.ctx -G rsa -g sha256 -s rsassa \
                             -u ak.pub -n ak.name -f pem 2>>step1.err \
     && "$TPM2_BIN" quote -c ak.ctx -l "$BANK:$PCRS" -q "$NONCE" \
                          -m quote.msg -s quote.sig -o pcrs.bin -g "$BANK" -f plain 2>>step1.err; then
@@ -302,17 +317,16 @@ CRED_HEX=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
 printf '%s' "$CRED_HEX" | xxd -r -p > cred.secret 2>/dev/null
 AK_NAME_HEX=$(od -An -tx1 < ak.name 2>/dev/null | tr -d ' \n')
 
-# EK auth requires a policy session satisfying TPM_RH_ENDORSEMENT
-# (tpm2_policysecret -c e). Without this, activatecredential fails
-# with TPM_RC_AUTH_UNAVAILABLE (0x12F).
+# activatecredential needs a policy session satisfying TPM_RH_ENDORSEMENT
+# AND the EK referenced via its persistent handle (see EK_HANDLE above).
 step6_ok="false"
 if [ -n "$AK_NAME_HEX" ] \
-    && "$TPM2_BIN" makecredential -e ek.pub -s cred.secret \
+    && "$TPM2_BIN" makecredential -T none -e ek.pub -s cred.secret \
                                   -n "$AK_NAME_HEX" \
                                   -o cred.blob 2>step6.err; then
   if "$TPM2_BIN" startauthsession --policy-session -S ek.session 2>>step6.err \
       && "$TPM2_BIN" policysecret -S ek.session -c e >/dev/null 2>>step6.err \
-      && "$TPM2_BIN" activatecredential -c ak.ctx -C ek.handle \
+      && "$TPM2_BIN" activatecredential -c ak.ctx -C "$EK_HANDLE" \
                                         -P "session:ek.session" \
                                         -i cred.blob -o cred.recovered 2>>step6.err; then
     RECOVERED_HEX=$(od -An -tx1 < cred.recovered 2>/dev/null | tr -d ' \n')
