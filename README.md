@@ -209,15 +209,15 @@ If you want a runnable artifact for an xnode/Own1 fleet, this is that.
 ## Status
 
 - [x] Step 1 (quote) — verified live on Intel firmware-TPM
-- [x] Step 2 (EK cert + chain) — verified; chain to Intel root works against bundled root
+- [x] Step 2 (EK cert + chain) — verified; partial-trust chain check against bundled Intel root
 - [x] Step 3 (PCR golden) — verified
 - [x] Step 4 (seal) — verified
 - [x] Step 5 (unseal positive + negative) — verified
-- [ ] Step 6 (activatecredential) — drafted, not yet wired into the script
+- [x] Step 6 (activatecredential) — wired with policy session for the endorsement hierarchy
 - [x] Step 7 (event log replay) — `tpm2_eventlog` parses cleanly; explicit Secure Boot check works
-- [ ] Multi-vendor CA bundle — Intel root only; other vendors pending
-- [ ] xnode-app deployment — flake structure ready, container TPM-device bind-mounts depend on `xnode-manager` allowing them (untested)
-- [ ] Workstation `nix run` mode — flake stub, not yet wired to the script
+- [x] Workstation / direct-host mode — runs anywhere a Linux + TPM2 + Nix stack exists
+- [ ] Multi-vendor CA bundle — Intel root only; other vendor roots pending
+- [ ] xnode-app deployment — flake structure ready; container TPM-device bind-mounts depend on `xnode-manager` honouring `DeviceAllow=`
 
 ## Related
 

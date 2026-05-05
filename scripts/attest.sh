@@ -82,9 +82,15 @@ fi
 hdr "Platform identification"
 
 PROPS_FIXED=$("$TPM2_BIN" getcap properties-fixed 2>&1 || echo "")
-MFR_HEX=$(echo "$PROPS_FIXED" | awk '/TPM2_PT_MANUFACTURER/{getline;print}' | grep -oE '0x[0-9A-Fa-f]+' | head -1)
-FW1=$(echo "$PROPS_FIXED" | awk '/TPM2_PT_FIRMWARE_VERSION_1/{getline;print}' | grep -oE '0x[0-9A-Fa-f]+' | head -1)
-FW2=$(echo "$PROPS_FIXED" | awk '/TPM2_PT_FIRMWARE_VERSION_2/{getline;print}' | grep -oE '0x[0-9A-Fa-f]+' | head -1)
+# Use sed for parsing — awk is sometimes missing from minimal PATH (relay
+# agent contexts, busybox shells); sed is in coreutils-ish on every distro.
+extract_after() {
+  local key="$1"
+  printf '%s\n' "$PROPS_FIXED" | sed -n "/$key/{n;p;}" | grep -oE '0x[0-9A-Fa-f]+' | head -1
+}
+MFR_HEX=$(extract_after 'TPM2_PT_MANUFACTURER')
+FW1=$(extract_after 'TPM2_PT_FIRMWARE_VERSION_1')
+FW2=$(extract_after 'TPM2_PT_FIRMWARE_VERSION_2')
 
 # Vendor name resolution — codes only used here, never surfaced in the log.
 case "$MFR_HEX" in
@@ -120,7 +126,7 @@ if "$TPM2_BIN" createek -c ek.handle -G rsa -u ek.pub 2>step1.err \
     && "$TPM2_BIN" quote -c ak.ctx -l "$BANK:$PCRS" -q "$NONCE" \
                          -m quote.msg -s quote.sig -o pcrs.bin -g "$BANK" -f plain 2>>step1.err; then
   step_pass "AK created under EK; quote signed for $BANK:$PCRS"
-  AK_FPR=$("$OPENSSL_BIN" pkey -pubin -in ak.pub -outform DER 2>/dev/null | "$OPENSSL_BIN" dgst -sha256 -hex | awk '{print $NF}')
+  AK_FPR=$("$OPENSSL_BIN" pkey -pubin -in ak.pub -outform DER 2>/dev/null | "$OPENSSL_BIN" dgst -sha256 -hex 2>/dev/null | grep -oE '[0-9a-f]{64}' | head -1)
   note "AK fingerprint (sha256 of pubkey): ${AK_FPR:0:16}…"
   note "quote.msg size: $(wc -c < quote.msg) bytes"
   note "quote.sig size: $(wc -c < quote.sig) bytes (RSASSA-PKCS1v1.5-SHA256)"
@@ -136,6 +142,17 @@ if "$TPM2_BIN" nvread 0x01c00002 -o ek.cert.der 2>step2.err; then
   if [ -n "${OPENSSL_BIN:-}" ] && "$OPENSSL_BIN" version >/dev/null 2>&1; then
     EK_SUBJECT=$("$OPENSSL_BIN" x509 -in ek.cert.der -inform DER -noout -subject 2>/dev/null | sed 's/^subject=//')
     EK_ISSUER=$("$OPENSSL_BIN"  x509 -in ek.cert.der -inform DER -noout -issuer  2>/dev/null | sed 's/^issuer=//')
+
+    # Fallback vendor lookup from issuer DN if hex dispatch missed
+    if [ "$VENDOR" = "unknown" ]; then
+      case "$EK_ISSUER" in
+        *Intel*|*OnDie*|*ODCA*) VENDOR="Intel"; CLASS="silicon firmware-TPM (from cert DN)" ;;
+        *AMD*)                  VENDOR="AMD"; CLASS="silicon firmware-TPM (from cert DN)" ;;
+        *Infineon*)             VENDOR="Infineon"; CLASS="silicon discrete TPM (from cert DN)" ;;
+        *Nuvoton*)              VENDOR="Nuvoton"; CLASS="silicon discrete TPM (from cert DN)" ;;
+        *STMicro*|*ST*TPM*)     VENDOR="STMicro"; CLASS="silicon discrete TPM (from cert DN)" ;;
+      esac
+    fi
     EK_DATES=$("$OPENSSL_BIN"   x509 -in ek.cert.der -inform DER -noout -dates   2>/dev/null)
     note "issuer:    $EK_ISSUER"
     [ -n "$EK_SUBJECT" ] && note "subject:   $EK_SUBJECT"
@@ -285,19 +302,29 @@ CRED_HEX=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
 printf '%s' "$CRED_HEX" | xxd -r -p > cred.secret 2>/dev/null
 AK_NAME_HEX=$(od -An -tx1 < ak.name 2>/dev/null | tr -d ' \n')
 
+# EK auth requires a policy session satisfying TPM_RH_ENDORSEMENT
+# (tpm2_policysecret -c e). Without this, activatecredential fails
+# with TPM_RC_AUTH_UNAVAILABLE (0x12F).
+step6_ok="false"
 if [ -n "$AK_NAME_HEX" ] \
     && "$TPM2_BIN" makecredential -e ek.pub -s cred.secret \
                                   -n "$AK_NAME_HEX" \
-                                  -o cred.blob 2>step6.err \
-    && "$TPM2_BIN" activatecredential -c ak.ctx -C ek.handle \
-                                      -i cred.blob -o cred.recovered 2>>step6.err; then
-  RECOVERED_HEX=$(od -An -tx1 < cred.recovered 2>/dev/null | tr -d ' \n')
-  if [ "$RECOVERED_HEX" = "$CRED_HEX" ]; then
-    step_pass "challenge wrapped to EK + tagged with AK name; activation recovered the secret"
-    note "this proves AK is TPM-resident (not software RSA) AND lives under THIS EK"
-  else
-    step_fail "credential recovered but did not match challenge"
+                                  -o cred.blob 2>step6.err; then
+  if "$TPM2_BIN" startauthsession --policy-session -S ek.session 2>>step6.err \
+      && "$TPM2_BIN" policysecret -S ek.session -c e >/dev/null 2>>step6.err \
+      && "$TPM2_BIN" activatecredential -c ak.ctx -C ek.handle \
+                                        -P "session:ek.session" \
+                                        -i cred.blob -o cred.recovered 2>>step6.err; then
+    RECOVERED_HEX=$(od -An -tx1 < cred.recovered 2>/dev/null | tr -d ' \n')
+    [ "$RECOVERED_HEX" = "$CRED_HEX" ] && step6_ok="true"
   fi
+  "$TPM2_BIN" flushcontext ek.session 2>/dev/null || true
+  rm -f ek.session
+fi
+
+if [ "$step6_ok" = "true" ]; then
+  step_pass "challenge wrapped to EK + tagged with AK name; activation recovered the secret"
+  note "this proves AK is TPM-resident (not software RSA) AND lives under THIS EK"
 else
   step_fail "makecredential/activatecredential failed: $(tail -2 step6.err 2>/dev/null | head -1)"
 fi
