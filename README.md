@@ -213,11 +213,11 @@ If you want a runnable artifact for an xnode/Own1 fleet, this is that.
 - [x] Step 3 (PCR golden) — verified
 - [x] Step 4 (seal) — verified
 - [x] Step 5 (unseal positive + negative) — verified
-- [x] Step 6 (activatecredential) — wired with policy session for the endorsement hierarchy
+- [x] Step 6 (activatecredential) — verified end-to-end on Intel PTT
 - [x] Step 7 (event log replay) — `tpm2_eventlog` parses cleanly; explicit Secure Boot check works
 - [x] Workstation / direct-host mode — runs anywhere a Linux + TPM2 + Nix stack exists
+- [x] xnode-app deployment — deploys cleanly via `om app deploy`; reports "no TPM" diagnostic when container has no `/dev/tpm*` access
 - [ ] Multi-vendor CA bundle — Intel root only; other vendor roots pending
-- [ ] xnode-app deployment — flake structure ready; container TPM-device bind-mounts depend on `xnode-manager` honouring `DeviceAllow=`
 
 ## Related
 
