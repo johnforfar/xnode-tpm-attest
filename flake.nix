@@ -65,6 +65,10 @@
       # `om app deploy --flake github:johnforfar/xnode-tpm-attest <name>`
       # produces a systemd-nspawn container that runs attest.sh once at
       # startup and once an hour, with output captured by the journal.
+      # xnode-manager adds this flake as an input on the host and imports
+      # nixosModules.default from it — so we must expose the module here.
+      nixosModules.default = ./nix/module.nix;
+
       nixosConfigurations.container = nixpkgs.lib.nixosSystem {
         # nixpkgs.hostPlatform is set by xnode-manager's container module
         # from xnode-config/host-platform — don't set it again here.
