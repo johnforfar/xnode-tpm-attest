@@ -3,10 +3,9 @@
 
   inputs = {
     xnode-manager.url = "github:Openmesh-Network/xnode-manager";
-    # Pinned to a stable nixpkgs commit known to boot cleanly inside
-    # xnode-manager's nixos-containers. Bleeding-edge nixpkgs causes
-    # dhcpcd / mDNS startup issues in the container.
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
+    # Use the exact nixpkgs that xnode-manager was tested against — avoids
+    # version-skew issues when the container module evolves.
+    nixpkgs.follows = "xnode-manager/nixpkgs";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
