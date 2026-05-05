@@ -66,7 +66,6 @@
       # produces a systemd-nspawn container that runs attest.sh once at
       # startup and once an hour, with output captured by the journal.
       nixosConfigurations.container = nixpkgs.lib.nixosSystem {
-        specialArgs = { inherit self; };
         # nixpkgs.hostPlatform is set by xnode-manager's container module
         # from xnode-config/host-platform — don't set it again here.
         modules = [
