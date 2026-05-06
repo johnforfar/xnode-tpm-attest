@@ -70,6 +70,10 @@
       # nixosModules.default from it — so we must expose the module here.
       nixosModules.default = ./nix/module.nix;
 
+      # Drop-in for any other xnode-app: integrate Layer 2 (PCR-extend on
+      # service start) + Layer 4 (heartbeat timer) with ~5 lines of options.
+      nixosModules.appAttestation = ./nix/app-attestation-module.nix;
+
       nixosConfigurations.container = nixpkgs.lib.nixosSystem {
         # nixpkgs.hostPlatform is set by xnode-manager's container module
         # from xnode-config/host-platform — don't set it again here.
