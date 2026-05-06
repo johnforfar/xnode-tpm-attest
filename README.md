@@ -19,6 +19,36 @@ via `nix run`.
 
 **What "experimental" means here:** the code paths exist, the vendor will be identified correctly, the script will attempt the standard TPM2 protocol — but specific firmware quirks (different NV-index layouts, different EK key templates, different `tpm2_createek` invocations, different policy session requirements) may cause individual steps to fail in vendor-specific ways. The first operator to run this on real AMD/Nuvoton/STMicro hardware will produce useful telemetry; treat their first run as a debug session, not a trust signal.
 
+## Test emulation (no hardware needed)
+
+Pass `--emulator` to run the protocol against a software TPM 2.0
+([`swtpm`](https://github.com/stefanberger/swtpm)) instead of real silicon.
+Lets you run the full protocol test on **any Linux machine** — Own1,
+xnode-1, workstation, CI runner — even ones with no TPM, with a vTPM
+already in use, or in containers without `/dev/tpm*` passthrough.
+
+```sh
+nix run github:johnforfar/xnode-tpm-attest -- --emulator
+```
+
+| What `--emulator` mode covers | What it does NOT cover |
+|---|---|
+| Quote signature correctness | Silicon authenticity — swtpm's EK chains to a self-signed CA, not Intel/AMD/Infineon |
+| PCR golden-digest computation | Real boot-time PCR measurements (swtpm starts blank; PCRs are zero unless you extend them yourself) |
+| Seal-to-PCR + unseal flow | Vendor-specific firmware quirks (e.g. the Intel PTT persistent-handle bug we hit) — swtpm is a clean reference impl, doesn't reproduce them |
+| Negative test (wrong policy → unseal fails) | Hardware fingerprinting / fleet-uniqueness properties (each swtpm instance has a unique state, but vendor identity is uniformly "swtpm") |
+| Credential activation / AK ↔ EK binding | Side-channel resistance, physical-presence operations, anti-tamper |
+| Verifier code paths, parallel attestation, replay-attack handling | Real EFI / TPM event log replay (swtpm has no kernel event log) |
+
+**Use it for:** developing the verifier side, load-testing parallel
+attestation across N nodes (run N swtpm instances), CI checks that
+protocol changes don't regress the standard flow, debugging registry
+integration without burning out a real TPM's DA counter.
+
+**Don't use it for:** any production trust decision, "verify this is
+genuine Intel/AMD silicon," or anything that needs to look at PCR 7
+(Secure Boot state) — swtpm has no firmware to measure.
+
 ## What it does
 
 Three deploy modes from one flake:

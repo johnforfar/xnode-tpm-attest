@@ -17,6 +17,7 @@
         paths = with pkgs; [
           tpm2-tools
           openssl
+          swtpm                # for --emulator mode
           coreutils
           gnugrep
           gnused

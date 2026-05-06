@@ -4,11 +4,18 @@
 #   - systemd oneshot service (output captured by the journal)
 #   - `nix run github:johnforfar/xnode-tpm-attest` from any shell
 #   - manual ./scripts/attest.sh
+#   - `... --emulator` to use a swtpm software TPM (no hardware needed)
 #
-# All TPM operations target /dev/tpmrm0 (kernel resource manager).
+# All TPM operations target /dev/tpmrm0 by default, or an emulator if
+# --emulator / EMULATOR=1 is set.
 
 set -u
 set -o pipefail
+
+EMULATOR="${EMULATOR:-0}"
+case "${1:-}" in
+  --emulator) EMULATOR=1; shift ;;
+esac
 
 PCRS="${PCRS:-0,4,7,9,11}"
 BANK="${BANK:-sha256}"
@@ -18,12 +25,40 @@ EVENTLOG="${EVENTLOG:-/sys/kernel/security/tpm0/binary_bios_measurements}"
 EFIVARS_DIR="${EFIVARS_DIR:-/sys/firmware/efi/efivars}"
 CA_DIR="${CA_DIR:-$(cd "$(dirname "$0")/../ca-bundle" 2>/dev/null && pwd || echo "")}"
 WORK_DIR=$(mktemp -d -t xnode-tpm-attest.XXXXXX)
+SWTPM_PID=""
+
 cleanup() {
   rm -rf "$WORK_DIR"
   # Evict the persistent EK we created (best-effort; ignore if not loaded)
   "$TPM2_BIN" evictcontrol -C o -c "${EK_HANDLE:-0x81010009}" 2>/dev/null || true
+  # Stop swtpm if we started one
+  [ -n "$SWTPM_PID" ] && kill "$SWTPM_PID" 2>/dev/null || true
 }
 trap cleanup EXIT
+
+# ─── emulator mode: start swtpm in the background ─────────────────────────
+if [ "$EMULATOR" = "1" ]; then
+  command -v swtpm >/dev/null 2>&1 || {
+    echo "ERROR: --emulator requires 'swtpm' on PATH (nix-shell -p swtpm)" >&2
+    exit 1
+  }
+  SWTPM_DIR="$WORK_DIR/swtpm-state"
+  SWTPM_SOCK="$WORK_DIR/swtpm.sock"
+  mkdir -p "$SWTPM_DIR"
+  swtpm socket --tpm2 --tpmstate "dir=$SWTPM_DIR" \
+               --ctrl "type=unixio,path=$SWTPM_SOCK.ctrl" \
+               --server "type=unixio,path=$SWTPM_SOCK" \
+               --flags startup-clear --daemon \
+               --pid "file=$WORK_DIR/swtpm.pid"
+  # Wait briefly for the socket
+  for i in 1 2 3 4 5; do [ -S "$SWTPM_SOCK" ] && break; sleep 0.2; done
+  SWTPM_PID=$(cat "$WORK_DIR/swtpm.pid" 2>/dev/null || echo "")
+  export TPM2TOOLS_TCTI="swtpm:path=$SWTPM_SOCK"
+  # swtpm has no kernel event log
+  EVENTLOG="/dev/null"
+  # swtpm has no EFI variables
+  EFIVARS_DIR="/dev/null"
+fi
 
 export TPM2TOOLS_TCTI="${TPM2TOOLS_TCTI:-device:/dev/tpmrm0}"
 
@@ -51,11 +86,14 @@ echo "host:        $(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || ec
 echo "kernel:      $(uname -srm)"
 echo "started_at:  $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "pcr_set:     $BANK:$PCRS"
+[ "$EMULATOR" = "1" ] && echo "mode:        EMULATOR (swtpm) — protocol test only, NOT silicon-attested"
 
 # ─── pre-flight ─────────────────────────────────────────────────────────
 hdr "Pre-flight"
 
-if [ -e /dev/tpmrm0 ]; then
+if [ "$EMULATOR" = "1" ]; then
+  ok "swtpm emulator running on $TPM2TOOLS_TCTI"
+elif [ -e /dev/tpmrm0 ]; then
   ok "TPM resource manager device present at /dev/tpmrm0"
 elif [ -e /dev/tpm0 ]; then
   warn "/dev/tpm0 present but /dev/tpmrm0 missing — no kernel resource manager"
@@ -65,7 +103,7 @@ else
   echo
   echo "VERDICT: NO TPM AVAILABLE — attestation cannot proceed"
   echo "(this is expected on cloud VMs without a vTPM, or in containers"
-  echo " without /dev/tpm* bind-mounts)"
+  echo " without /dev/tpm* bind-mounts; pass --emulator to use swtpm instead)"
   exit 0
 fi
 
@@ -107,8 +145,10 @@ case "$MFR_HEX" in
   0x4D534654) VENDOR="Microsoft"; CLASS="virtual TPM (vTPM)" ;;
   0x47464F47) VENDOR="Google";    CLASS="virtual TPM (vTPM)" ;;
   0x53574F46) VENDOR="SwTPM";     CLASS="virtual TPM (vTPM)" ;;
+  0x49424D20) VENDOR="IBM";       CLASS="virtual TPM (vTPM)" ;;  # IBM SwTPM emulator
   *)          VENDOR="unknown";   CLASS="unknown" ;;
 esac
+[ "$EMULATOR" = "1" ] && CLASS="emulator (swtpm) — protocol test only"
 
 ok "vendor:     $VENDOR"
 ok "class:      $CLASS"
@@ -170,7 +210,9 @@ for idx in 0x01c00002 0x01c0000a 0x01c00012; do
   fi
 done
 
-if [ -n "$EK_NV_INDEX" ]; then
+if [ "$EMULATOR" = "1" ] && [ -z "$EK_NV_INDEX" ]; then
+  step_skip "swtpm has no provisioned EK cert by default — silicon-vendor chain check N/A in emulator mode"
+elif [ -n "$EK_NV_INDEX" ]; then
   ok "EK certificate read from NV index $EK_NV_INDEX ($(wc -c < ek.cert.der) bytes)"
   if [ -n "${OPENSSL_BIN:-}" ] && "$OPENSSL_BIN" version >/dev/null 2>&1; then
     EK_SUBJECT=$("$OPENSSL_BIN" x509 -in ek.cert.der -inform DER -noout -subject 2>/dev/null | sed 's/^subject=//')
