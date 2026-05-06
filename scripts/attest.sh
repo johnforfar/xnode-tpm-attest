@@ -119,6 +119,15 @@ case "$CLASS" in
   *)         warn "unknown vendor — proceed with caution" ;;
 esac
 
+# Mark non-Intel vendors as experimental (only Intel PTT is verified on
+# real hardware as of 2026-05-05). Other paths are wired but untested.
+case "$VENDOR" in
+  Intel) ;;
+  AMD|Infineon|Nuvoton|STMicro)
+    warn "EXPERIMENTAL VENDOR PATH — not yet verified against real $VENDOR hardware"
+    note "the script will attempt the standard flow; please report any failures" ;;
+esac
+
 # ─── STEP 1 — quote PCRs ─────────────────────────────────────────────────
 hdr "Step 1 — Generate AK and quote PCRs"
 
@@ -152,8 +161,17 @@ fi
 # ─── STEP 2 — EK certificate + chain ────────────────────────────────────
 hdr "Step 2 — Read EK certificate from NV, verify chain"
 
-if "$TPM2_BIN" nvread 0x01c00002 -o ek.cert.der 2>step2.err; then
-  ok "EK certificate read from NV index 0x01c00002 ($(wc -c < ek.cert.der) bytes)"
+# Probe NV indices in order: 0x01c00002 (RSA EK, TCG-spec), 0x01c0000a (ECC
+# EK), 0x01c00012 (high-range RSA, used by some recent vendors).
+EK_NV_INDEX=""
+for idx in 0x01c00002 0x01c0000a 0x01c00012; do
+  if "$TPM2_BIN" nvread "$idx" -o ek.cert.der 2>step2.err; then
+    EK_NV_INDEX="$idx"; break
+  fi
+done
+
+if [ -n "$EK_NV_INDEX" ]; then
+  ok "EK certificate read from NV index $EK_NV_INDEX ($(wc -c < ek.cert.der) bytes)"
   if [ -n "${OPENSSL_BIN:-}" ] && "$OPENSSL_BIN" version >/dev/null 2>&1; then
     EK_SUBJECT=$("$OPENSSL_BIN" x509 -in ek.cert.der -inform DER -noout -subject 2>/dev/null | sed 's/^subject=//')
     EK_ISSUER=$("$OPENSSL_BIN"  x509 -in ek.cert.der -inform DER -noout -issuer  2>/dev/null | sed 's/^issuer=//')
@@ -198,8 +216,42 @@ if "$TPM2_BIN" nvread 0x01c00002 -o ek.cert.der 2>step2.err; then
           step_warn "Intel CA bundle missing at $ROOT — chain not validated"
         fi
         ;;
-      AMD|Infineon|Nuvoton|STMicro)
-        step_warn "$VENDOR CA bundle not yet shipped — chain not validated"
+      Infineon)
+        # Infineon roots ARE bundled (RSA + ECC). Try whichever matches the EK key alg.
+        warn "EXPERIMENTAL — flow not yet verified on real Infineon hardware"
+        ROOT_RSA="$CA_DIR/infineon-rsa-root.crt"
+        MFR_RSA="$CA_DIR/infineon-rsa-mfr-ca001.crt"
+        ROOT_ECC="$CA_DIR/infineon-ecc-root.crt"
+        MFR_ECC="$CA_DIR/infineon-ecc-mfr-ca001.crt"
+        TMPLEAF=$(mktemp)
+        "$OPENSSL_BIN" x509 -inform DER -in ek.cert.der > "$TMPLEAF" 2>/dev/null
+        VERIFIED="false"
+        for pair in "$ROOT_RSA $MFR_RSA" "$ROOT_ECC $MFR_ECC"; do
+          set -- $pair
+          if [ -f "$1" ] && [ -f "$2" ]; then
+            if "$OPENSSL_BIN" verify -CAfile "$1" -untrusted "$2" -purpose any "$TMPLEAF" >/dev/null 2>&1; then
+              VERIFIED="true"; CHAIN_RESULT="full chain via $(basename "$1")"; break
+            fi
+          fi
+        done
+        rm -f "$TMPLEAF"
+        if [ "$VERIFIED" = "true" ]; then
+          step_pass "EK chain verified against bundled Infineon roots ($CHAIN_RESULT)"
+        else
+          step_warn "Infineon roots bundled but chain didn't verify — please report the EK issuer DN above"
+        fi
+        ;;
+      AMD)
+        warn "EXPERIMENTAL — AMD fTPM not yet tested by this script"
+        step_warn "AMD CA root not yet bundled (AIA-walk from a real EK cert required); chain not validated"
+        ;;
+      Nuvoton)
+        warn "EXPERIMENTAL — Nuvoton TPM not yet tested by this script"
+        step_warn "Nuvoton CA root not yet bundled (developer.nuvoton.com endpoint not reachable); chain not validated"
+        ;;
+      STMicro)
+        warn "EXPERIMENTAL — STMicro TPM not yet tested by this script"
+        step_warn "STMicro CA root not yet bundled (sw-center.st.com endpoints 404); chain not validated"
         ;;
       Microsoft|Google|SwTPM)
         step_skip "virtual TPM detected — chain validation requires cloud-provider attestation API, not silicon CA"

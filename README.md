@@ -1,21 +1,33 @@
 # xnode-tpm-attest
 
-A self-contained TPM 2.0 remote-attestation tool for xnodes, Own1 nodes,
-and any other Linux machine with a TPM. Runs the full seven-step
-attestation flow, generates a human-readable HTML report, and serves it
-on a local web URL.
+A self-contained TPM 2.0 remote-attestation tool. Runs the canonical
+seven-step quote / seal / unseal / credential-activation flow, prints a
+human-readable log to stdout. Deploys as an xnode app or runs anywhere
+via `nix run`.
 
-Designed to be deployed two ways:
+## Tested on / not tested on
 
-1. **As an xnode app** — `om app deploy --flake github:johnforfar/xnode-tpm-attest <name>` and the report appears at `https://<name>.<your-xnode-domain>/`
-2. **Direct on a workstation / bare-metal node** — `nix run github:johnforfar/xnode-tpm-attest` (writes report to a local path; optional `--serve` flag starts a local web server)
+| Vendor | Class | Status | Notes |
+|---|---|---|---|
+| **Intel** PTT (firmware TPM) | silicon | ✅ **Fully tested** | All 7 steps verified end-to-end on Beelink GTi15 Ultra (Meteor Lake) 2026-05-05 |
+| **Cloud xnodes** with no TPM passthrough | n/a | ✅ **Verified diagnostic** | Reports "no TPM device" cleanly; doesn't crash. Tested on xnode-1. |
+| **Infineon** OPTIGA TPM | silicon discrete | ⚠️ **Experimental** | RSA + ECC root + intermediate CAs bundled (publicly fetchable from `pki.infineon.com`); chain validation logic wired but **not verified on real Infineon hardware**. The script will try the standard flow and label vendor-specific output `EXPERIMENTAL`. |
+| **AMD** fTPM (PSP) | silicon | ⚠️ **Experimental** | Vendor detection wired; **CA root not bundled** — AMD ships fTPM roots out-of-band and the URL moves between security advisories. Resolve by AIA-walking from a real AMD-fTPM EK cert when first AMD node enrols. |
+| **Nuvoton** NPCT75x | silicon discrete | ⚠️ **Experimental** | Vendor detection wired; **CA root not bundled** — `developer.nuvoton.com` not reachable from build host. |
+| **STMicro** ST33TP* | silicon discrete | ⚠️ **Experimental** | Vendor detection wired; **CA root not bundled** — `sw-center.st.com` endpoints 404. |
+| Microsoft / Google / SwTPM (vTPM) | virtual | ✅ **Detection verified** | Identified correctly; chain validation skipped (vTPMs need cloud-provider attestation API, not silicon CA). |
 
-The protocol is platform-agnostic: same code runs on bare-metal Beelinks
-with firmware TPMs, on workstations with discrete TPMs, on cloud VMs
-with virtualised TPMs, and on any future fleet member. The *output*
-adapts: the EK certificate chain, the firmware version, the boot-state
-PCR digests will all be different on each machine. The protocol's job
-is to surface those differences in a way a verifier can act on.
+**What "experimental" means here:** the code paths exist, the vendor will be identified correctly, the script will attempt the standard TPM2 protocol — but specific firmware quirks (different NV-index layouts, different EK key templates, different `tpm2_createek` invocations, different policy session requirements) may cause individual steps to fail in vendor-specific ways. The first operator to run this on real AMD/Nuvoton/STMicro hardware will produce useful telemetry; treat their first run as a debug session, not a trust signal.
+
+## What it does
+
+Three deploy modes from one flake:
+
+1. **As an xnode app** — `om app deploy --flake github:johnforfar/xnode-tpm-attest <name>` — runs as a systemd oneshot, output in the journal, retrieve via `om app logs <name>`
+2. **Direct on any Linux + Nix host** — `nix run github:johnforfar/xnode-tpm-attest` — runs the probe and prints to stdout
+3. **Via the Claude relay or any HTTP fetch** — `curl -fsS https://raw.githubusercontent.com/johnforfar/xnode-tpm-attest/main/scripts/attest.sh | bash` — runs the script directly, no Nix needed (assumes `tpm2-tools`, `openssl`, etc. on PATH)
+
+Same script everywhere. The output adapts: present TPMs run all 7 steps and print pass/fail per step; absent TPMs print a clean "no TPM available" diagnostic.
 
 ## What it actually does
 
