@@ -144,57 +144,62 @@ in {
     };
   };
 
-  config = lib.mkMerge (
-    [
-      {
-        environment.systemPackages = [ attestRuntime pcrExtendApp runAttestedApp ];
-      }
-    ]
-    ++ lib.mapAttrsToList
+  # Config-block shape is fixed (keys = environment.systemPackages,
+  # systemd.services, systemd.timers). Dynamic per-app expansion happens
+  # inside each value. Putting `lib.mkMerge` at the top of `config = ...`
+  # forces NixOS to enumerate cfg.apps during module-merge and that cycles
+  # because cfg.apps lives inside the same config the merge produces.
+  config = {
+    environment.systemPackages =
+      [ attestRuntime pcrExtendApp runAttestedApp ]
+      ++ lib.mapAttrsToList mkHeartbeatScript cfg.apps;
+
+    systemd.services = lib.mkMerge (
+      lib.mapAttrsToList
+        (appName: appCfg:
+          let
+            unit = "xnode-attest-heartbeat-${appName}";
+            cmd = "${pcrExtendApp}/bin/pcr-extend-app ${toString appCfg.pcr} ${appCfg.execPath}";
+          in {
+            # Layer 2: PCR-extend the app's binary hash before the unit starts.
+            # `-` prefix on non-fail-closed makes ExecStartPre best-effort.
+            ${appCfg.service} = {
+              serviceConfig.ExecStartPre = lib.mkBefore [
+                (if appCfg.failClosed then cmd else "-${cmd}")
+              ];
+              serviceConfig.DeviceAllow = lib.mkAfter [ "/dev/tpm0 rw" "/dev/tpmrm0 rw" ];
+            };
+
+            # Layer 4: continuous attestation via per-app systemd unit.
+            ${unit} = {
+              description = "xnode-app-attestation heartbeat for ${appName}";
+              after = [ "network.target" "${appCfg.service}.service" ];
+              serviceConfig = {
+                Type = "oneshot";
+                ExecStart = "${mkHeartbeatScript appName appCfg}/bin/${unit}";
+                StandardOutput = "journal";
+                StandardError = "journal";
+                DeviceAllow = [ "/dev/tpm0 rw" "/dev/tpmrm0 rw" ];
+                User = "root";
+              };
+            };
+          }
+        )
+        cfg.apps
+    );
+
+    systemd.timers = lib.mapAttrs'
       (appName: appCfg:
-        let
-          heartbeatScript = mkHeartbeatScript appName appCfg;
-          unit = "xnode-attest-heartbeat-${appName}";
-        in {
-          # Layer 2: PCR-extend the app's binary hash before the unit starts.
-          # `-` prefix on non-fail-closed makes ExecStartPre best-effort.
-          systemd.services.${appCfg.service} = {
-            serviceConfig.ExecStartPre = lib.mkBefore [
-              (
-                let cmd = "${pcrExtendApp}/bin/pcr-extend-app ${toString appCfg.pcr} ${appCfg.execPath}";
-                in if appCfg.failClosed then cmd else "-${cmd}"
-              )
-            ];
-            serviceConfig.DeviceAllow = lib.mkAfter [ "/dev/tpm0 rw" "/dev/tpmrm0 rw" ];
+        lib.nameValuePair "xnode-attest-heartbeat-${appName}" {
+          description = "xnode-app-attestation heartbeat schedule for ${appName}";
+          wantedBy = [ "timers.target" ];
+          timerConfig = {
+            OnBootSec = "60s";
+            OnUnitActiveSec = appCfg.heartbeatInterval;
+            Unit = "xnode-attest-heartbeat-${appName}.service";
           };
-
-          # Layer 4: continuous attestation via per-app systemd timer.
-          systemd.services.${unit} = {
-            description = "xnode-app-attestation heartbeat for ${appName}";
-            after = [ "network.target" "${appCfg.service}.service" ];
-            serviceConfig = {
-              Type = "oneshot";
-              ExecStart = "${heartbeatScript}/bin/${unit}";
-              StandardOutput = "journal";
-              StandardError = "journal";
-              DeviceAllow = [ "/dev/tpm0 rw" "/dev/tpmrm0 rw" ];
-              User = "root";
-            };
-          };
-
-          systemd.timers.${unit} = {
-            description = "xnode-app-attestation heartbeat schedule for ${appName}";
-            wantedBy = [ "timers.target" ];
-            timerConfig = {
-              OnBootSec = "60s";
-              OnUnitActiveSec = appCfg.heartbeatInterval;
-              Unit = "${unit}.service";
-            };
-          };
-
-          environment.systemPackages = [ heartbeatScript ];
         }
       )
-      cfg.apps
-  );
+      cfg.apps;
+  };
 }
