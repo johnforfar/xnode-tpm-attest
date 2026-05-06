@@ -1,9 +1,75 @@
 # xnode-tpm-attest
 
 A self-contained TPM 2.0 remote-attestation tool. Runs the canonical
-seven-step quote / seal / unseal / credential-activation flow, prints a
-human-readable log to stdout. Deploys as an xnode app or runs anywhere
-via `nix run`.
+seven-step quote / seal / unseal / credential-activation flow, plus an
+**end-to-end orchestrator** that talks to a separate verifier service
+([xnode-tpm-verify](https://github.com/johnforfar/xnode-tpm-verify))
+to prove that a real app produced a real output on a real attested
+machine.
+
+Three modes from one flake:
+
+```sh
+# 1. Standalone protocol self-test (no verifier needed)
+nix run github:johnforfar/xnode-tpm-attest
+
+# 2. Standalone, against a software TPM (no hardware needed)
+nix run github:johnforfar/xnode-tpm-attest -- --emulator
+
+# 3. End-to-end attested-app orchestrator (talks to a verifier)
+APP_NAME=hello-attested \
+VERIFIER_URL=https://attest.build.openmesh.cloud \
+TASK_INPUT="hello" \
+nix run github:johnforfar/xnode-tpm-attest#run-attested-app
+```
+
+## Drop-in NixOS module for any xnode-app or own1-app
+
+The fastest path to attesting an existing service. Add five lines to your
+flake and the module wires PCR-extending the binary's hash on service
+start (Layer 2) plus a heartbeat timer (Layer 4):
+
+```nix
+# in your app's flake.nix
+inputs.xnode-tpm-attest.url = "github:johnforfar/xnode-tpm-attest";
+# ...
+modules = [
+  inputs.xnodeos.nixosModules.app
+  inputs.xnode-tpm-attest.nixosModules.appAttestation
+  ({ pkgs, ... }: {
+    services.ollama.enable = true;
+    services.xnode-app-attestation = {
+      enable     = true;
+      appName    = "ollama";
+      service    = "ollama";
+      execPath   = "${pkgs.ollama}/bin/ollama";
+      pcr        = 16;
+      heartbeatInterval = "5min";
+      verifierUrl = "https://attest.build.openmesh.cloud";
+    };
+  })
+];
+```
+
+What gets auto-wired:
+
+- `ExecStartPre` on the named systemd unit → extends `pcr` with `sha256(execPath)` before the unit starts
+- A systemd timer (`xnode-attest-heartbeat`) that re-quotes and POSTs `/heartbeat` every `heartbeatInterval`
+- `DeviceAllow` for `/dev/tpm*` on both units
+- `failClosed = true` (default false): refuses to start if PCR-extend fails
+
+Operator side, register the app once with the verifier:
+
+```sh
+EXEC_HASH=$(sha256sum /run/current-system/sw/bin/ollama | cut -d' ' -f1)
+curl -fsS -X POST -H "authorization: Bearer $OPERATOR_TOKEN" \
+  -H 'content-type: application/json' \
+  -d "{\"app_name\":\"ollama\",\"version\":\"v0.5.7\",\"closure_hash\":\"$EXEC_HASH\",\"expected_pcrs\":{}}" \
+  https://attest.build.openmesh.cloud/register-app
+```
+
+After the first quote lands, capture the live PCR values from the receipt
+and re-register with them pinned to enable drift detection.
 
 ## Tested on / not tested on
 
