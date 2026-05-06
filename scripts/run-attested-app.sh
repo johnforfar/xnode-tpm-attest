@@ -159,7 +159,7 @@ TASK_RESP=$(curl -fsS -H 'content-type: application/json' \
   --data-binary @task-req.json "$VERIFIER_URL/task-result") \
   || fail "POST /task-result failed"
 
-TASK_RECEIPT_ID=$(printf '%s' "$TASK_RESP" | python3 -c 'import sys,json; print(json.load(sys.stdin)["receipt_id"])')
+TASK_RECEIPT_ID=$(json_str "$TASK_RESP" receipt_id)
 ok "task-completion receipt: $TASK_RECEIPT_ID"
 
 # ─── 7. summary ───────────────────────────────────────────────────────────
