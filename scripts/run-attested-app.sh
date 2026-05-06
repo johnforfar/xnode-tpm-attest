@@ -53,9 +53,10 @@ echo "  pcrs:      $BANK:$PCRS  (app pcr=$APP_PCR)"
 # ─── 1. fetch golden ──────────────────────────────────────────────────────
 hdr "1. Fetch golden values from verifier"
 GOLDEN=$(curl -fsS "$VERIFIER_URL/golden/$APP_NAME") || fail "GET /golden/$APP_NAME failed"
-EXPECTED_CLOSURE=$(printf '%s' "$GOLDEN" | python3 -c 'import sys,json; print(json.load(sys.stdin)["closure_hash"])')
+# Trivial JSON extraction with sed — avoids python3/jq dependency
+json_str() { printf '%s' "$1" | sed -nE 's/.*"'"$2"'"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' | head -1; }
+EXPECTED_CLOSURE=$(json_str "$GOLDEN" closure_hash)
 ok "expected closure hash: ${EXPECTED_CLOSURE:0:24}…"
-ok "expected pcr 16:       $(printf '%s' "$GOLDEN" | python3 -c 'import sys,json; pcrs=json.load(sys.stdin)["expected_pcrs"]; print(pcrs.get("16","(none)")[:24]+"…")')"
 
 # ─── 2. compute and extend PCR with app hash ──────────────────────────────
 hdr "2. PCR-extend app identity"
@@ -115,8 +116,8 @@ VERDICT_RESP=$(curl -fsS -H 'content-type: application/json' \
   || fail "POST /verify-quote failed"
 
 echo "$VERDICT_RESP" > verdict.json
-VERDICT=$(printf '%s' "$VERDICT_RESP" | python3 -c 'import sys,json; print(json.load(sys.stdin)["body"]["verdict"])')
-ATT_RECEIPT_ID=$(printf '%s' "$VERDICT_RESP" | python3 -c 'import sys,json; print(json.load(sys.stdin)["receipt_id"])')
+VERDICT=$(json_str "$VERDICT_RESP" verdict)
+ATT_RECEIPT_ID=$(json_str "$VERDICT_RESP" receipt_id)
 
 case "$VERDICT" in
   attested) ok "verifier verdict: ATTESTED" ;;
@@ -138,8 +139,13 @@ ok "task output ($(printf '%s' "$TASK_OUTPUT" | wc -c) bytes): $TASK_OUTPUT"
 
 # ─── 6. submit result ─────────────────────────────────────────────────────
 hdr "6. POST /task-result"
-TASK_INPUT_J=$(printf '%s' "$TASK_INPUT" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')
-TASK_OUTPUT_J=$(printf '%s' "$TASK_OUTPUT" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')
+# Trivial JSON-string escaping — handles \, ", and basic ASCII cleanly
+json_quote() {
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/$/\\n/' \
+    | tr -d '\n' | sed 's/\\n$//' | awk '{print "\"" $0 "\""}'
+}
+TASK_INPUT_J=$(json_quote "$TASK_INPUT")
+TASK_OUTPUT_J=$(json_quote "$TASK_OUTPUT")
 
 cat > task-req.json <<EOF
 {
