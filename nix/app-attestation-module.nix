@@ -128,12 +128,13 @@ in {
     environment.systemPackages = [ attestRuntime pcrExtendApp runAttestedApp heartbeatScript ];
 
     # Layer 2: ExecStartPre extends the PCR with the binary's hash before the unit starts.
+    # `-` prefix on non-fail-closed makes the pre-step best-effort.
     systemd.services.${cfg.service} = {
       serviceConfig.ExecStartPre = lib.mkBefore [
-        (lib.mkIf cfg.failClosed
-          "${pcrExtendApp}/bin/pcr-extend-app ${toString cfg.pcr} ${cfg.execPath}")
-        (lib.mkIf (!cfg.failClosed)
-          "-${pcrExtendApp}/bin/pcr-extend-app ${toString cfg.pcr} ${cfg.execPath}")
+        (
+          let cmd = "${pcrExtendApp}/bin/pcr-extend-app ${toString cfg.pcr} ${cfg.execPath}";
+          in if cfg.failClosed then cmd else "-${cmd}"
+        )
       ];
       serviceConfig.DeviceAllow = lib.mkAfter [ "/dev/tpm0 rw" "/dev/tpmrm0 rw" ];
     };
