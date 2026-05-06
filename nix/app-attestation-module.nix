@@ -56,7 +56,7 @@ let
         | grep -oE '[0-9]+\s*:\s*0x[0-9A-Fa-f]+' \
         | sed -E 's/^[[:space:]]*([0-9]+)[[:space:]]*:[[:space:]]*0x([0-9A-Fa-f]+)[[:space:]]*$/  "\1": "\2"/' \
         | tr 'A-F' 'a-f' | paste -sd ',' -)
-      LIVE_JSON="{${LIVE_JSON}}"
+      LIVE_JSON="{''${LIVE_JSON}}"
 
       cat > req.json <<JSON
       {
