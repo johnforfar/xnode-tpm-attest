@@ -15,23 +15,25 @@ let
     install -Dm755 ${../scripts/run-attested-app.sh} $out/bin/run-attested-app
   '';
 
-  heartbeatScript = pkgs.writeShellApplication {
-    name = "xnode-attest-heartbeat";
+  # Heartbeat script — one binary per registered app so they don't race
+  # on the TPM EK handle (each invocation is serialised under the systemd
+  # timer; per-app units keep names + journal output discoverable).
+  mkHeartbeatScript = appName: appCfg: pkgs.writeShellApplication {
+    name = "xnode-attest-heartbeat-${appName}";
     runtimeInputs = [ attestRuntime ];
     text = ''
       set -u
-      APP_NAME="${cfg.appName}"
-      VERIFIER_URL="${cfg.verifierUrl}"
-      EXEC_PATH="${cfg.execPath}"
-      PCR="${toString cfg.pcr}"
-      EK_HANDLE="${cfg.ekHandle}"
+      APP_NAME="${appName}"
+      VERIFIER_URL="${appCfg.verifierUrl}"
+      EXEC_PATH="${appCfg.execPath}"
+      PCR="${toString appCfg.pcr}"
+      EK_HANDLE="${appCfg.ekHandle}"
 
       export TPM2TOOLS_TCTI="''${TPM2TOOLS_TCTI:-device:/dev/tpmrm0}"
       WORK=$(mktemp -d)
       trap 'rm -rf "$WORK"; tpm2 evictcontrol -C o -c "$EK_HANDLE" 2>/dev/null || true' EXIT
       cd "$WORK"
 
-      # Compute current closure hash and re-extend PCR (idempotent each cycle)
       ACTUAL=$(sha256sum "$EXEC_PATH" | awk '{print $1}')
 
       tpm2 evictcontrol -C o -c "$EK_HANDLE" 2>/dev/null || true
@@ -48,10 +50,6 @@ let
       SIG_B64=$(base64 -w0 < quote.sig 2>/dev/null || base64 < quote.sig | tr -d '\n')
       AK_PEM=$(awk 'BEGIN{ORS="\\n"}{print}' < ak.pub)
 
-      # Read the live PCR values so the verifier can compare against
-      # registered expected_pcrs and report drift. Without this the
-      # mismatches list is always empty and "attested" only means "AK
-      # signature valid" — not "boot stack matches the published build".
       LIVE_JSON=$(tpm2 pcrread "sha256:0,4,7,9,11,$PCR" 2>/dev/null \
         | grep -oE '[0-9]+\s*:\s*0x[0-9A-Fa-f]+' \
         | sed -E 's/^[[:space:]]*([0-9]+)[[:space:]]*:[[:space:]]*0x([0-9A-Fa-f]+)[[:space:]]*$/  "\1": "\2"/' \
@@ -76,101 +74,127 @@ let
     '';
   };
 
+  appSubmodule = lib.types.submodule {
+    options = {
+      service = lib.mkOption {
+        type = lib.types.str;
+        description = "systemd unit to gate. ExecStartPre extends the PCR with execPath's hash before this unit starts.";
+      };
+      execPath = lib.mkOption {
+        type = lib.types.str;
+        description = "Absolute path to the binary whose hash binds this app's identity.";
+      };
+      pcr = lib.mkOption {
+        type = lib.types.int;
+        default = 16;
+        description = ''
+          PCR index to extend. On Intel PTT only PCR 16 is reliably
+          user-extendable (17-22 require locality 4 / DRTM). All apps on
+          the same box typically share PCR 16; their hashes accumulate.
+        '';
+      };
+      verifierUrl = lib.mkOption {
+        type = lib.types.str;
+        default = "https://attest.build.openmesh.cloud";
+      };
+      ekHandle = lib.mkOption {
+        type = lib.types.str;
+        default = "0x81010009";
+        description = "TPM persistent handle to provision the EK at. Must be free.";
+      };
+      heartbeatInterval = lib.mkOption {
+        type = lib.types.str;
+        default = "5min";
+        description = "Re-attestation cadence (systemd OnUnitActiveSec format).";
+      };
+      failClosed = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          If true, the gated unit fails to start when the initial pcr-extend
+          fails. If false (default), the ExecStartPre is best-effort.
+        '';
+      };
+    };
+  };
+
 in {
   options.services.xnode-app-attestation = {
-    enable = lib.mkEnableOption "xnode-app-attestation — bind app identity to a TPM PCR + heartbeat to verifier";
-
-    appName = lib.mkOption {
-      type = lib.types.str;
-      example = "ollama";
-      description = "Name registered with the verifier; must match /register-app on the verifier side.";
-    };
-
-    service = lib.mkOption {
-      type = lib.types.str;
-      example = "ollama";
-      description = "systemd unit name to gate. ExecStartPre will hash execPath and extend the PCR before the unit starts.";
-    };
-
-    execPath = lib.mkOption {
-      type = lib.types.str;
-      example = "/run/current-system/sw/bin/ollama";
-      description = "Absolute path to the binary whose hash binds this app. Hashed at every heartbeat.";
-    };
-
-    pcr = lib.mkOption {
-      type = lib.types.int;
-      default = 16;
-      description = "PCR index (16-22 are user-extendable per TCG spec).";
-    };
-
-    verifierUrl = lib.mkOption {
-      type = lib.types.str;
-      default = "https://attest.build.openmesh.cloud";
-      description = "Verifier service base URL.";
-    };
-
-    ekHandle = lib.mkOption {
-      type = lib.types.str;
-      default = "0x81010009";
-      description = "TPM persistent handle to provision the EK at. Must be free.";
-    };
-
-    heartbeatInterval = lib.mkOption {
-      type = lib.types.str;
-      default = "5min";
-      description = "Re-attestation cadence (systemd OnUnitActiveSec format).";
-    };
-
-    failClosed = lib.mkOption {
-      type = lib.types.bool;
-      default = false;
+    apps = lib.mkOption {
+      type = lib.types.attrsOf appSubmodule;
+      default = { };
+      example = lib.literalExpression ''
+        {
+          own1-inference-llm = {
+            service = "own1-inference-llm";
+            execPath = "''${pkg}/bin/llama-server";
+          };
+          own1-inference-image = {
+            service = "own1-inference-image";
+            execPath = "''${pkg}/bin/sd-server";
+          };
+        }
+      '';
       description = ''
-        If true, the gated unit will fail to start if the initial pcr-extend
-        fails (no TPM, attestation cannot proceed). If false (default), the
-        ExecStartPre is best-effort and the service still starts; only the
-        heartbeat loop reports drift to the verifier.
+        Per-app attestation registry. Each entry produces an ExecStartPre
+        hook on the named systemd service (extends a PCR with the binary's
+        hash before start) and a heartbeat timer that re-quotes the PCR set
+        to the verifier on heartbeatInterval.
       '';
     };
   };
 
-  config = lib.mkIf cfg.enable {
-    environment.systemPackages = [ attestRuntime pcrExtendApp runAttestedApp heartbeatScript ];
+  config = lib.mkMerge (
+    [
+      {
+        environment.systemPackages = [ attestRuntime pcrExtendApp runAttestedApp ];
+      }
+    ]
+    ++ lib.mapAttrsToList
+      (appName: appCfg:
+        let
+          heartbeatScript = mkHeartbeatScript appName appCfg;
+          unit = "xnode-attest-heartbeat-${appName}";
+        in {
+          # Layer 2: PCR-extend the app's binary hash before the unit starts.
+          # `-` prefix on non-fail-closed makes ExecStartPre best-effort.
+          systemd.services.${appCfg.service} = {
+            serviceConfig.ExecStartPre = lib.mkBefore [
+              (
+                let cmd = "${pcrExtendApp}/bin/pcr-extend-app ${toString appCfg.pcr} ${appCfg.execPath}";
+                in if appCfg.failClosed then cmd else "-${cmd}"
+              )
+            ];
+            serviceConfig.DeviceAllow = lib.mkAfter [ "/dev/tpm0 rw" "/dev/tpmrm0 rw" ];
+          };
 
-    # Layer 2: ExecStartPre extends the PCR with the binary's hash before the unit starts.
-    # `-` prefix on non-fail-closed makes the pre-step best-effort.
-    systemd.services.${cfg.service} = {
-      serviceConfig.ExecStartPre = lib.mkBefore [
-        (
-          let cmd = "${pcrExtendApp}/bin/pcr-extend-app ${toString cfg.pcr} ${cfg.execPath}";
-          in if cfg.failClosed then cmd else "-${cmd}"
-        )
-      ];
-      serviceConfig.DeviceAllow = lib.mkAfter [ "/dev/tpm0 rw" "/dev/tpmrm0 rw" ];
-    };
+          # Layer 4: continuous attestation via per-app systemd timer.
+          systemd.services.${unit} = {
+            description = "xnode-app-attestation heartbeat for ${appName}";
+            after = [ "network.target" "${appCfg.service}.service" ];
+            serviceConfig = {
+              Type = "oneshot";
+              ExecStart = "${heartbeatScript}/bin/${unit}";
+              StandardOutput = "journal";
+              StandardError = "journal";
+              DeviceAllow = [ "/dev/tpm0 rw" "/dev/tpmrm0 rw" ];
+              User = "root";
+            };
+          };
 
-    # Layer 4: continuous attestation via systemd timer.
-    systemd.services.xnode-attest-heartbeat = {
-      description = "xnode-app-attestation heartbeat for ${cfg.appName}";
-      after = [ "network.target" config.systemd.services.${cfg.service}.name ];
-      serviceConfig = {
-        Type = "oneshot";
-        ExecStart = "${heartbeatScript}/bin/xnode-attest-heartbeat";
-        StandardOutput = "journal";
-        StandardError = "journal";
-        DeviceAllow = [ "/dev/tpm0 rw" "/dev/tpmrm0 rw" ];
-        User = "root";
-      };
-    };
+          systemd.timers.${unit} = {
+            description = "xnode-app-attestation heartbeat schedule for ${appName}";
+            wantedBy = [ "timers.target" ];
+            timerConfig = {
+              OnBootSec = "60s";
+              OnUnitActiveSec = appCfg.heartbeatInterval;
+              Unit = "${unit}.service";
+            };
+          };
 
-    systemd.timers.xnode-attest-heartbeat = {
-      description = "xnode-app-attestation heartbeat schedule";
-      wantedBy = [ "timers.target" ];
-      timerConfig = {
-        OnBootSec = "60s";
-        OnUnitActiveSec = cfg.heartbeatInterval;
-        Unit = "xnode-attest-heartbeat.service";
-      };
-    };
-  };
+          environment.systemPackages = [ heartbeatScript ];
+        }
+      )
+      cfg.apps
+  );
 }
