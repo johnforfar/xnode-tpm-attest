@@ -48,6 +48,16 @@ let
       SIG_B64=$(base64 -w0 < quote.sig 2>/dev/null || base64 < quote.sig | tr -d '\n')
       AK_PEM=$(awk 'BEGIN{ORS="\\n"}{print}' < ak.pub)
 
+      # Read the live PCR values so the verifier can compare against
+      # registered expected_pcrs and report drift. Without this the
+      # mismatches list is always empty and "attested" only means "AK
+      # signature valid" — not "boot stack matches the published build".
+      LIVE_JSON=$(tpm2 pcrread "sha256:0,4,7,9,11,$PCR" 2>/dev/null \
+        | grep -oE '[0-9]+\s*:\s*0x[0-9A-Fa-f]+' \
+        | sed -E 's/^[[:space:]]*([0-9]+)[[:space:]]*:[[:space:]]*0x([0-9A-Fa-f]+)[[:space:]]*$/  "\1": "\2"/' \
+        | tr 'A-F' 'a-f' | paste -sd ',' -)
+      LIVE_JSON="{${LIVE_JSON}}"
+
       cat > req.json <<JSON
       {
         "app_name": "$APP_NAME",
@@ -55,7 +65,7 @@ let
         "quote_msg_b64": "$QUOTE_B64",
         "quote_sig_b64": "$SIG_B64",
         "ak_pub_pem": "$AK_PEM",
-        "live_pcrs": {}
+        "live_pcrs": $LIVE_JSON
       }
       JSON
 
